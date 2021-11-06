@@ -1,6 +1,7 @@
 ﻿
 using UdonSharp;
 using UnityEngine;
+using UnityEngine.UI;
 using VRC.SDKBase;
 using VRC.Udon;
 using VRC.Udon.Common;
@@ -17,12 +18,13 @@ public class LeashNeckAttach : UdonSharpBehaviour
     /// <summary>
     /// Max distance to neck bone when you want to attach the collar.
     /// </summary>
-    public float MaxDistanceToNeck = 1f;
+    public float MaxDistanceToNeck = 0.5f;
 
     /// <summary>
     /// How long the leash is before it starts pulling.
     /// </summary>
-    public float LeashLength = 2f;
+    [UdonSynced]
+    public float LeashLength = 1.5f;
 
     /// <summary>
     /// The leash will always pull *at least* this hard on the attached player when he goes out of range.
@@ -69,13 +71,49 @@ public class LeashNeckAttach : UdonSharpBehaviour
     private Vector3 oldHandlePosition;
 
     /// <summary>
-    /// If set, the debug rigidbody will be used for the leash mechanics if no player is attached.
+    /// The transform that defines the collar mesh. This object will be moved, scaled and rotated based on the player-set offsets.
     /// </summary>
-    public Rigidbody DebugRigidBody;
+    public Transform CollarMeshTransform;
 
     private VRC_Pickup collarPickup;
 
     private VRCPlayerApi currentOwner;
+
+    // Below: extra properties that can be adjusted by the owner to change the position offset, rotation, scale etc.
+    #region CustomizableProperties
+    [UdonSynced]
+    public Vector3 PositionOffset;
+
+    [UdonSynced]
+    public Vector3 RotationOffset;
+
+    [UdonSynced]
+    public Vector3 Scale = new Vector3(1,1,1);
+
+    [UdonSynced]
+    public bool CanPickupWhenAttached = true;
+    #endregion
+
+    // Lord please
+    #region UISettingReferences
+    public Slider XPositionOffsetSlider;
+
+    public Slider YPositionOffsetSlider;
+
+    public Slider ZPositionOffsetSlider;
+
+    public Slider XRotationSlider;
+
+    public Slider YRotationSlider;
+
+    public Slider ZRotationSlider;
+
+    public Slider ScaleSlider;
+
+    public Toggle CanPickupWhenAttachedToggle;
+
+    public Slider LeashLengthSlider;
+    #endregion
 
     void Start()
     {
@@ -92,6 +130,39 @@ public class LeashNeckAttach : UdonSharpBehaviour
         oldHandlePosition = LeashHandle.transform.position;
         collarPickup = (VRC_Pickup)GetComponent(typeof(VRC_Pickup));
         currentOwner = Networking.GetOwner(this.gameObject);
+
+        UpdateLeashLine();
+    }
+
+    public override void OnDeserialization()
+    {
+        UpdateCollarTransform();
+        UpdateLeashSettings();
+    }
+
+    private void UpdateCollarTransform()
+    {
+        // Update the mesh based on the new transform offsets
+        if (CollarMeshTransform == null)
+        {
+            return;
+        }
+
+        CollarMeshTransform.localPosition = PositionOffset;
+        CollarMeshTransform.localRotation = Quaternion.Euler(RotationOffset);
+        CollarMeshTransform.localScale = Scale;
+    }
+
+    private void UpdateLeashSettings()
+    {
+        if (!CanPickupWhenAttached && Attached)
+        {
+            this.collarPickup.pickupable = false;
+        }
+        else
+        {
+            this.collarPickup.pickupable = true;
+        }
     }
 
     public override void OnPickupUseDown()
@@ -139,7 +210,14 @@ public class LeashNeckAttach : UdonSharpBehaviour
     {
         // PostLateUpdate is called post-IK, meaning we can more accurately reposition the collar and leash line.
         UpdateCollarPosition();
-        UpdateLeashLine();
+
+        // Skip updating the leash line if the collar isn't being worn/held and the leash handle isn't being held.
+        // Avoids some expensive calculations.
+        // NOTE: This is probably no longer necessary if the line were drawn via shader instead.
+        if (this.collarPickup.IsHeld || this.LeashHandle.IsHeld || Attached)
+        {
+            UpdateLeashLine();
+        }
     }
 
     private void UpdateCollarPosition()
@@ -177,24 +255,73 @@ public class LeashNeckAttach : UdonSharpBehaviour
             return;
         }
 
-        // Use the dedicated attachment points if available. Otherwise, use the collar transform and leash hande transform.
+        // Use the dedicated attachment points if available. Otherwise, use the collar transform and leash handle transform.
+        Vector3 collarPoint;
         if (CollarLineAttachPoint != null)
         {
-            LeashLine.SetPosition(0, CollarLineAttachPoint.position);
+            collarPoint = CollarLineAttachPoint.position;
         }
         else
         {
-            LeashLine.SetPosition(0, this.transform.position);
+            collarPoint = this.transform.position;
         }
 
+        Vector3 handlePoint;
         if (LeashHandleLineAttachPoint != null)
         {
-            LeashLine.SetPosition(1, LeashHandleLineAttachPoint.position);
+            handlePoint = LeashHandleLineAttachPoint.position;
         }
         else
         {
-            LeashLine.SetPosition(1, LeashHandle.transform.position);
+            handlePoint = LeashHandle.transform.position;
         }
+
+        // Make a smooth curve between 3 points (collar, midway, handle).
+        // The midway point rises up as the leash gets pulled further away, or down if it gets closer.
+        // Note: perhaps a shader would have been a lot more performant for this...
+        float dist = Vector3.Distance(collarPoint, handlePoint);
+
+        // Calculate the needed curve and set each point
+        float curveHeight = Mathf.Max(Mathf.Sqrt(LeashLength - dist), 0f);
+
+        LeashLine.SetPosition(0, collarPoint);
+
+        // An even amount of points is recommended.
+        // TODO: Adjust this based on leash length? Or maybe this whole thing should just be a shader to begin with...
+        int linePointAmount = LeashLine.positionCount;
+
+        // Calculate where the line midpoints should be.
+        for (int i = 1; i < linePointAmount - 1; i++)
+        {
+            float samplePointPerStep = (1f / (linePointAmount - 1));
+            float samplePoint = samplePointPerStep * i;
+
+            LeashLine.SetPosition(i, SampleParabola(collarPoint, handlePoint, curveHeight, samplePoint, new Vector3(0, -1, 0)));
+        }
+        LeashLine.SetPosition(linePointAmount - 1, handlePoint);
+    }
+
+    // Copied from https://forum.unity.com/threads/drawing-an-arc-from-point-to-point.1000336/#post-6503648
+    /// <summary>
+    /// Samples a parabolic curve.
+    /// </summary>
+    /// <param name="start">The start of the curve.</param>
+    /// <param name="end">The end of the curve.</param>
+    /// <param name="height">The curve's height.</param>
+    /// <param name="t">Normalized length of where to sample the curve (0-1, with 0 being the start)</param>
+    /// <param name="outDirection">The direction that the curve should go towards.</param>
+    /// <returns>A point on the parabola.</returns>
+    private Vector3 SampleParabola(Vector3 start, Vector3 end, float height, float t, Vector3 outDirection)
+    {
+        float parabolicT = t * 2 - 1;
+        //start and end are not level, gets more complicated
+        Vector3 travelDirection = end - start;
+        Vector3 levelDirection = end - new Vector3(start.x, end.y, start.z);
+        Vector3 right = Vector3.Cross(travelDirection, levelDirection);
+        Vector3 up = outDirection;
+        Vector3 result = start + t * travelDirection;
+        result += ((-parabolicT * parabolicT + 1) * height) * up.normalized;
+        return result;
     }
 
     void FixedUpdate()
@@ -238,17 +365,10 @@ public class LeashNeckAttach : UdonSharpBehaviour
         var velocity = media / Time.fixedDeltaTime;
 
         // Pull back the attached player if possible.
-        // In the editor, the player may not exist, but a debug rigidbody might be attached instead, so use that.
         if (Utilities.IsValid(Networking.LocalPlayer))
         {
             PullPlayer(velocity.magnitude);
         }
-        else if (DebugRigidBody != null)
-        {
-            DebugRigidBody.velocity = velocity;
-        }
-
-        Debug.Log(string.Format("Doing leash pull, X: {0} Y: {1} Z: {2}", velocity.x, velocity.y, velocity.z), this);
     }
 
     private void PullPlayer(float leashHandleVelocity)
@@ -311,4 +431,43 @@ public class LeashNeckAttach : UdonSharpBehaviour
             currentOwner = Networking.GetOwner(this.gameObject);
         }
     }
+
+    #region UIEvents
+    public void OnUIOffsetsChanged()
+    {
+        // Update the position and rotation offsets, and the scale, based on the UI sliders.
+        // NOTE: Will only work for the person holding or wearing the collar!
+        if (XPositionOffsetSlider != null && YPositionOffsetSlider != null && ZPositionOffsetSlider != null)
+        {
+            PositionOffset = new Vector3(XPositionOffsetSlider.value, YPositionOffsetSlider.value, ZPositionOffsetSlider.value);
+        }
+
+        if (XRotationSlider != null && YRotationSlider != null && ZRotationSlider != null)
+        {
+            RotationOffset = new Vector3(XRotationSlider.value, YRotationSlider.value, ZRotationSlider.value);
+        }
+
+        if (ScaleSlider != null)
+        {
+            Scale = new Vector3(ScaleSlider.value, ScaleSlider.value, ScaleSlider.value);
+        }
+
+        UpdateCollarTransform();
+    }
+
+    public void OnLeashSettingsChanged()
+    {
+        if (CanPickupWhenAttachedToggle != null)
+        {
+            CanPickupWhenAttached = CanPickupWhenAttachedToggle.isOn;
+        }
+
+        if (LeashLengthSlider != null)
+        {
+            LeashLength = LeashLengthSlider.value;
+        }
+
+        UpdateLeashSettings();
+    }
+    #endregion
 }
