@@ -42,7 +42,12 @@ public class LeashNeckAttach : UdonSharpBehaviour
     /// The leash will always pull *at least* this hard on the attached player when he goes out of range.
     /// If VariablePullStrength is true, the actual pull strength *could* be higher.
     /// </summary>
-    public float MinPullStrength = 4f;
+    public float MinPullStrength = 3f;
+
+    /// <summary>
+    /// The leash can never "pull" players harder than this. Prevents "incidents" where players fly off at absolutely absurd speeds.
+    /// </summary>
+    public float MaxPullStrength = 10f;
 
     /// <summary>
     /// A multiplier for the leash pull velocity after all other calculations are done.
@@ -337,7 +342,7 @@ public class LeashNeckAttach : UdonSharpBehaviour
         return result;
     }
 
-    void FixedUpdate()
+    void Update()
     {
         if (Attached && Networking.IsOwner(Networking.LocalPlayer, this.gameObject) && LeashHandle != null)
         {
@@ -345,7 +350,10 @@ public class LeashNeckAttach : UdonSharpBehaviour
             CheckLeashMoveWhileOutOfRange();
             CheckLeashPull();
         }
+    }
 
+    void LateUpdate()
+    {
         oldHandlePosition = LeashHandle.transform.position;
         oldCollarPosition = this.transform.position;
         oldPlayerPosition = Networking.LocalPlayer.GetPosition();
@@ -358,8 +366,8 @@ public class LeashNeckAttach : UdonSharpBehaviour
     private void CheckLeashMoveOutOfRange()
     {
         // If the player was in range last update but out of range last update, teleport them back to the last "in range" position.
-        var oldDist = Vector3.Distance(this.LeashHandle.transform.position, this.oldCollarPosition);
-        var newDist = Vector3.Distance(this.LeashHandle.transform.position, this.transform.position);
+        var oldDist = Vector3.Distance(this.LeashHandle.transform.position, oldPlayerPosition);
+        var newDist = Vector3.Distance(this.LeashHandle.transform.position, Networking.LocalPlayer.GetPosition());
 
         if(oldDist > LeashLength || newDist <= LeashLength)
         {
@@ -367,8 +375,30 @@ public class LeashNeckAttach : UdonSharpBehaviour
             return;
         }
 
+        // Before we do anything else, check if we happen to already be moving in the direction of the leash. If so, don't do anything.
+        /*
+        var playerVelocity = Networking.LocalPlayer.GetVelocity();
+        if (playerVelocity != Vector3.zero)
+        {
+            var pullDirection = (Networking.LocalPlayer.GetPosition() - LeashHandle.transform.position).normalized;
+
+            var playerDirection = playerVelocity.normalized;
+            var playerSpeed = playerVelocity.magnitude;
+            var dot = Vector3.Dot(playerDirection, pullDirection);
+            if (dot < 0.8)
+            {
+                // Player is already moving towards the leash.
+                return;
+            }
+        }*/
+        if (newDist < oldDist)
+        {
+            return;
+        }
+
         // We moved out of range, teleport back in.
-        Networking.LocalPlayer.TeleportTo(oldPlayerPosition, Networking.LocalPlayer.GetRotation());
+        Networking.LocalPlayer.SetVelocity(Vector3.zero);
+        Networking.LocalPlayer.TeleportTo(oldPlayerPosition, Networking.LocalPlayer.GetRotation(), VRC_SceneDescriptor.SpawnOrientation.Default, true);
     }
 
     /// <summary>
@@ -376,8 +406,8 @@ public class LeashNeckAttach : UdonSharpBehaviour
     /// </summary>
     private void CheckLeashMoveWhileOutOfRange()
     {
-        var oldDist = Vector3.Distance(this.LeashHandle.transform.position, this.oldCollarPosition);
-        var newDist = Vector3.Distance(this.LeashHandle.transform.position, this.transform.position);
+        var oldDist = Vector3.Distance(this.LeashHandle.transform.position, this.oldPlayerPosition);
+        var newDist = Vector3.Distance(this.LeashHandle.transform.position, Networking.LocalPlayer.GetPosition());
         if (oldDist <= LeashLength || newDist <= LeashLength)
         {
             // We are either in range *now*, or we were in range last update. Either way, this function should not apply.
@@ -392,13 +422,14 @@ public class LeashNeckAttach : UdonSharpBehaviour
         }
 
         // Player tried to move further away from the leash handle, so pull them back.
-        Networking.LocalPlayer.TeleportTo(oldPlayerPosition, Networking.LocalPlayer.GetRotation());
+        Networking.LocalPlayer.SetVelocity(Vector3.zero);
+        Networking.LocalPlayer.TeleportTo(oldPlayerPosition, Networking.LocalPlayer.GetRotation(), VRC_SceneDescriptor.SpawnOrientation.Default, true);
     }
 
     private void CheckLeashPull()
     {
         // Move the attached player if the leash handle is pulled too far.
-        var distance = Vector3.Distance(this.transform.position, this.LeashHandle.transform.position);
+        var distance = Vector3.Distance(Networking.LocalPlayer.GetPosition(), this.LeashHandle.transform.position);
         if (distance <= LeashLength)
         {
             return;
@@ -409,7 +440,13 @@ public class LeashNeckAttach : UdonSharpBehaviour
         // NOTE: It currently seems impossible to get the velocity of a held pickup via its RigidBody.
         // So instead, we get the velocity by comparing the old transform position and the new one.
         var media = (LeashHandle.transform.position - oldHandlePosition);
-        var velocity = media / Time.fixedDeltaTime;
+        var velocity = media / Time.deltaTime;
+
+        // Limit the magnitude of the pull
+        if (velocity.magnitude > this.MaxPullStrength)
+        {
+            velocity = Vector3.ClampMagnitude(velocity, this.MaxPullStrength);
+        }
 
         // Pull back the attached player if possible.
         if (Utilities.IsValid(Networking.LocalPlayer))
@@ -451,7 +488,7 @@ public class LeashNeckAttach : UdonSharpBehaviour
             var playerDirection = playerVelocity.normalized;
             var playerSpeed = playerVelocity.magnitude;
             var dot = Vector3.Dot(playerDirection, pullDirection);
-            if(dot < 0.95 && playerSpeed >= pullStrength)
+            if(dot < 0.8 && playerSpeed >= pullStrength)
             {
                 // Player is already being pulled towards the leash at the right speed, therefore we shouldn't set the player's velocity.
                 return;

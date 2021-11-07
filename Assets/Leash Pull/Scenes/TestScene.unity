@@ -249,6 +249,11 @@ PrefabInstance:
       propertyPath: DynamicMaterials.Array.data[5]
       value: 
       objectReference: {fileID: 2100000, guid: c815f7613a04b724089c206857e57c6a, type: 2}
+    - target: {fileID: 6759095419728963412, guid: 8894fa7e4588a5c4fab98453e558847d,
+        type: 3}
+      propertyPath: DynamicMaterials.Array.data[6]
+      value: 
+      objectReference: {fileID: 2100000, guid: c815f7613a04b724089c206857e57c6a, type: 2}
     m_RemovedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: 8894fa7e4588a5c4fab98453e558847d, type: 3}
 --- !u!4 &35890614 stripped
@@ -1125,6 +1130,11 @@ PrefabInstance:
       propertyPath: publicVariablesUnityEngineObjects.Array.data[6]
       value: 
       objectReference: {fileID: 5353161511180729219}
+    - target: {fileID: 5353161510797243508, guid: defecc307fb8c434ca782d2f8c2e5e88,
+        type: 3}
+      propertyPath: publicVariablesUnityEngineObjects.Array.data[7]
+      value: 
+      objectReference: {fileID: 0}
     - target: {fileID: 5353161510798932870, guid: defecc307fb8c434ca782d2f8c2e5e88,
         type: 3}
       propertyPath: m_AnchorMax.y
