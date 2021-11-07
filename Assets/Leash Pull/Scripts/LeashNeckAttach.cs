@@ -12,6 +12,18 @@ public class LeashNeckAttach : UdonSharpBehaviour
     [UdonSynced]
     public bool Attached = false;
 
+    /// <summary>
+    /// World-space position offset from the attached neck. This is programmatically set when the collar is attached.
+    /// </summary>
+    [UdonSynced]
+    public Vector3 PositionOffset;
+
+    /// <summary>
+    /// World-space rotation offset from the attached neck. This is programmatically set when the collar is attached.
+    /// </summary>
+    [UdonSynced]
+    public Quaternion RotationOffset;
+
     // Needed to get a list of all players so we can get the closest player. Please tell me a better way to do this if you know one.
     private VRCPlayerApi[] playerList = new VRCPlayerApi[60];
 
@@ -30,7 +42,7 @@ public class LeashNeckAttach : UdonSharpBehaviour
     /// The leash will always pull *at least* this hard on the attached player when he goes out of range.
     /// If VariablePullStrength is true, the actual pull strength *could* be higher.
     /// </summary>
-    public float MinPullStrength = 2f;
+    public float MinPullStrength = 4f;
 
     /// <summary>
     /// A multiplier for the leash pull velocity after all other calculations are done.
@@ -71,7 +83,14 @@ public class LeashNeckAttach : UdonSharpBehaviour
     private Vector3 oldHandlePosition;
 
     /// <summary>
-    /// The transform that defines the collar mesh. This object will be moved, scaled and rotated based on the player-set offsets.
+    /// During FixedUpdate, the value of this field will be what the collar position was during the previous FixedUpdate.
+    /// </summary>
+    private Vector3 oldCollarPosition;
+
+    private Vector3 oldPlayerPosition;
+
+    /// <summary>
+    /// The transform that defines the collar mesh. This object will be scaled based on the scale slider.
     /// </summary>
     public Transform CollarMeshTransform;
 
@@ -79,14 +98,8 @@ public class LeashNeckAttach : UdonSharpBehaviour
 
     private VRCPlayerApi currentOwner;
 
-    // Below: extra properties that can be adjusted by the owner to change the position offset, rotation, scale etc.
+    // Below: extra properties that can be adjusted by the owner to change the scale etc.
     #region CustomizableProperties
-    [UdonSynced]
-    public Vector3 PositionOffset;
-
-    [UdonSynced]
-    public Vector3 RotationOffset;
-
     [UdonSynced]
     public Vector3 Scale = new Vector3(1,1,1);
 
@@ -94,20 +107,7 @@ public class LeashNeckAttach : UdonSharpBehaviour
     public bool CanPickupWhenAttached = true;
     #endregion
 
-    // Lord please
     #region UISettingReferences
-    public Slider XPositionOffsetSlider;
-
-    public Slider YPositionOffsetSlider;
-
-    public Slider ZPositionOffsetSlider;
-
-    public Slider XRotationSlider;
-
-    public Slider YRotationSlider;
-
-    public Slider ZRotationSlider;
-
     public Slider ScaleSlider;
 
     public Toggle CanPickupWhenAttachedToggle;
@@ -128,6 +128,8 @@ public class LeashNeckAttach : UdonSharpBehaviour
         }
 
         oldHandlePosition = LeashHandle.transform.position;
+        oldCollarPosition = this.transform.position;
+        oldPlayerPosition = Networking.LocalPlayer.GetPosition();
         collarPickup = (VRC_Pickup)GetComponent(typeof(VRC_Pickup));
         currentOwner = Networking.GetOwner(this.gameObject);
 
@@ -138,6 +140,12 @@ public class LeashNeckAttach : UdonSharpBehaviour
     {
         UpdateCollarTransform();
         UpdateLeashSettings();
+        // On deserialization, if the leash is not attached, update the line renderer so that the line matches.
+        // If the leash is attached, this will already happen anyway.
+        if (!Attached)
+        {
+            UpdateLeashLine();
+        }
     }
 
     private void UpdateCollarTransform()
@@ -148,8 +156,6 @@ public class LeashNeckAttach : UdonSharpBehaviour
             return;
         }
 
-        CollarMeshTransform.localPosition = PositionOffset;
-        CollarMeshTransform.localRotation = Quaternion.Euler(RotationOffset);
         CollarMeshTransform.localScale = Scale;
     }
 
@@ -195,6 +201,13 @@ public class LeashNeckAttach : UdonSharpBehaviour
         }
 
         // If we reached this point, we found the closest neck to attach to. Make the collar stick to the new player.
+        var neckPositionWorldspace = closestFoundPlayer.GetBonePosition(HumanBodyBones.Neck);
+        var neckRotationWorldspace = closestFoundPlayer.GetBoneRotation(HumanBodyBones.Neck);
+
+        // Set position/rotation offsets for the collar
+        PositionOffset = this.transform.position - neckPositionWorldspace;
+        RotationOffset = Quaternion.Inverse(this.transform.rotation) * neckRotationWorldspace;
+
         collarPickup.Drop();
         Attached = true;
         Networking.SetOwner(closestFoundPlayer, this.gameObject);
@@ -237,8 +250,8 @@ public class LeashNeckAttach : UdonSharpBehaviour
         var neckPosition = owner.GetBonePosition(HumanBodyBones.Neck);
         var neckRotation = owner.GetBoneRotation(HumanBodyBones.Neck);
 
-        this.transform.position = neckPosition;
-        this.transform.rotation = neckRotation;
+        this.transform.position = neckPosition + PositionOffset;
+        this.transform.rotation = neckRotation * RotationOffset;
 
         // Allow the owner to detach the collar on desktop by pressing X, since they probably cannot grab it at all if not in VR
         if (owner == Networking.LocalPlayer && Input.GetKey(KeyCode.X))
@@ -326,31 +339,65 @@ public class LeashNeckAttach : UdonSharpBehaviour
 
     void FixedUpdate()
     {
-        CheckLeashPull();
+        if (Attached && Networking.IsOwner(Networking.LocalPlayer, this.gameObject) && LeashHandle != null)
+        {
+            CheckLeashMoveOutOfRange();
+            CheckLeashMoveWhileOutOfRange();
+            CheckLeashPull();
+        }
+
         oldHandlePosition = LeashHandle.transform.position;
+        oldCollarPosition = this.transform.position;
+        oldPlayerPosition = Networking.LocalPlayer.GetPosition();
+    }
+
+    /// <summary>
+    /// Check if the player *only just now* moved out of the leash range.
+    /// If so, teleport them back.
+    /// </summary>
+    private void CheckLeashMoveOutOfRange()
+    {
+        // If the player was in range last update but out of range last update, teleport them back to the last "in range" position.
+        var oldDist = Vector3.Distance(this.LeashHandle.transform.position, this.oldCollarPosition);
+        var newDist = Vector3.Distance(this.LeashHandle.transform.position, this.transform.position);
+
+        if(oldDist > LeashLength || newDist <= LeashLength)
+        {
+            // We were either out of range last update, or in range in the current update. Either way, no longer applies.
+            return;
+        }
+
+        // We moved out of range, teleport back in.
+        Networking.LocalPlayer.TeleportTo(oldPlayerPosition, Networking.LocalPlayer.GetRotation());
+    }
+
+    /// <summary>
+    /// Block any movements made by the player while outside the leash range, unless it's towards the leash handle.
+    /// </summary>
+    private void CheckLeashMoveWhileOutOfRange()
+    {
+        var oldDist = Vector3.Distance(this.LeashHandle.transform.position, this.oldCollarPosition);
+        var newDist = Vector3.Distance(this.LeashHandle.transform.position, this.transform.position);
+        if (oldDist <= LeashLength || newDist <= LeashLength)
+        {
+            // We are either in range *now*, or we were in range last update. Either way, this function should not apply.
+            return;
+        }
+
+        // We made a movement while being stuck outside the leash range.
+        // Check if this movement gets the player closer to the leash handle. If so, allow it.
+        if(newDist < oldDist)
+        {
+            return;
+        }
+
+        // Player tried to move further away from the leash handle, so pull them back.
+        Networking.LocalPlayer.TeleportTo(oldPlayerPosition, Networking.LocalPlayer.GetRotation());
     }
 
     private void CheckLeashPull()
     {
         // Move the attached player if the leash handle is pulled too far.
-
-        // Never do this if the collar isn't attached.
-        if (!Attached)
-        {
-            return;
-        }
-
-        // Only do this if we are the owner.
-        if (Networking.GetOwner(this.gameObject) != Networking.LocalPlayer)
-        {
-            return;
-        }
-
-        if (LeashHandle == null)
-        {
-            return;
-        }
-
         var distance = Vector3.Distance(this.transform.position, this.LeashHandle.transform.position);
         if (distance <= LeashLength)
         {
@@ -435,24 +482,19 @@ public class LeashNeckAttach : UdonSharpBehaviour
     #region UIEvents
     public void OnUIOffsetsChanged()
     {
-        // Update the position and rotation offsets, and the scale, based on the UI sliders.
+        // Update the scale based on the UI sliders.
         // NOTE: Will only work for the person holding or wearing the collar!
-        if (XPositionOffsetSlider != null && YPositionOffsetSlider != null && ZPositionOffsetSlider != null)
-        {
-            PositionOffset = new Vector3(XPositionOffsetSlider.value, YPositionOffsetSlider.value, ZPositionOffsetSlider.value);
-        }
-
-        if (XRotationSlider != null && YRotationSlider != null && ZRotationSlider != null)
-        {
-            RotationOffset = new Vector3(XRotationSlider.value, YRotationSlider.value, ZRotationSlider.value);
-        }
-
         if (ScaleSlider != null)
         {
             Scale = new Vector3(ScaleSlider.value, ScaleSlider.value, ScaleSlider.value);
         }
 
         UpdateCollarTransform();
+
+        if (!Attached)
+        {
+            UpdateLeashLine();
+        }
     }
 
     public void OnLeashSettingsChanged()
@@ -468,6 +510,11 @@ public class LeashNeckAttach : UdonSharpBehaviour
         }
 
         UpdateLeashSettings();
+
+        if (!Attached)
+        {
+            UpdateLeashLine();
+        }
     }
     #endregion
 }
